@@ -1,0 +1,127 @@
+import serial
+import threading
+import time
+
+# ==========================================
+# 포트 설정
+# ==========================================
+# 메가: USB 연결버전 (블루투스 사용시 수정)
+MEGA_PORT = "/dev/ttyACM0"
+# 로봇 우노: GPIO UART (레벨컨버터 경유)
+ROBOT_PORT = "/dev/serial0"
+BAUD = 9600
+
+# ==========================================
+# 공유 상태
+# ==========================================
+# 최신 주차장 상태. 인덱스 0~5 = 슬롯 1~6번
+lot_state = ["UNKNOWN"] * 6
+lot_lock = threading.Lock()
+running = True
+
+# ==========================================
+# 스레드 1: 메가 수신 (0.5초마다 오는 CSV 파싱)
+# ==========================================
+def read_mega(mega):
+    global lot_state
+    while running:
+        try:
+            line = mega.readline().decode(errors="replace").strip()
+            if not line:
+                continue
+            parts = line.split(",")
+            # 6칸이 아니면 깨진 줄이므로 버림 (부팅 직후 조각난 줄 방지)
+            if len(parts) != 6:
+                continue
+            if not all(p in ("OCCUPIED", "EMPTY") for p in parts):
+                continue
+            with lot_lock:
+                if parts != lot_state:
+                    lot_state = parts
+                    print(f"\n[주차장 갱신] {format_lot(parts)}")
+        except Exception as e:
+            print(f"[메가 수신 오류] {e}")
+            time.sleep(1)
+
+# ==========================================
+# 스레드 2: 로봇 수신 (로봇이 보내는 응답/보고 표시)
+# ==========================================
+def read_robot(robot):
+    while running:
+        try:
+            line = robot.readline().decode(errors="replace").strip()
+            if line:
+                print(f"\n[로봇 → 파이] {line}")
+        except Exception as e:
+            print(f"[로봇 수신 오류] {e}")
+            time.sleep(1)
+
+# ==========================================
+# 슬롯 판단: 빈 슬롯 중 첫 번째 선택
+# (나중에 체류시간/Preference 알고리즘으로 교체될 자리)
+# ==========================================
+def pick_target():
+    with lot_lock:
+        for i, s in enumerate(lot_state):
+            if s == "EMPTY":
+                return i + 1   # 슬롯 번호는 1부터
+    return None
+
+def format_lot(parts):
+    return " | ".join(
+        f"{i+1}:{'빈자리' if p=='EMPTY' else ('주차됨' if p=='OCCUPIED' else '?')}"
+        for i, p in enumerate(parts)
+    )
+
+# ==========================================
+# 메인
+# ==========================================
+def main():
+    global running
+    mega = serial.Serial(MEGA_PORT, BAUD, timeout=2)
+    robot = serial.Serial(ROBOT_PORT, BAUD, timeout=2)
+    time.sleep(2)  # 포트 안정화 (메가는 USB 연결 시 자동 리셋됨)
+
+    threading.Thread(target=read_mega, args=(mega,), daemon=True).start()
+    threading.Thread(target=read_robot, args=(robot,), daemon=True).start()
+
+    print("=== S.N.A.P 파이 브릿지 시작 ===")
+    print("명령어: park(주차 요청) / status(현황) / t 3(3번 슬롯 강제 지정) / q(종료)\n")
+
+    while True:
+        cmd = input("> ").strip().lower()
+
+        if cmd == "q":
+            running = False
+            break
+
+        elif cmd == "status":
+            with lot_lock:
+                print(f"[현황] {format_lot(lot_state)}")
+
+        elif cmd == "park":
+            target = pick_target()
+            if target is None:
+                print("[판단] 빈 슬롯 없음 — 명령 전송 안 함")
+                continue
+            msg = f"TARGET:{target}\n"
+            robot.write(msg.encode())
+            print(f"[파이 → 로봇] {msg.strip()}  (빈 슬롯 중 {target}번 선택)")
+
+        elif cmd.startswith("t "):
+            # 테스트용: 판단 건너뛰고 특정 번호 강제 전송
+            try:
+                n = int(cmd.split()[1])
+                robot.write(f"TARGET:{n}\n".encode())
+                print(f"[파이 → 로봇] TARGET:{n}  (강제 지정)")
+            except (IndexError, ValueError):
+                print("사용법: t 3")
+
+        else:
+            print("명령어: park / status / t <번호> / q")
+
+    mega.close()
+    robot.close()
+    print("종료")
+
+main()
