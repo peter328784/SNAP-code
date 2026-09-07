@@ -1,0 +1,95 @@
+import serial
+import time
+
+# ==========================================
+# [입차 경로 (Inbound)]
+# 동작 순서:
+# S(차량 픽업) -> 교차로 이동 후 좌회전(UP) -> 마커(L) 지나서 해당 층 도달 -> 
+# 주차칸 방향으로 턴(W/C) -> E(라인 끝까지 진입) -> O(차량 드롭) -> 
+# B(후진으로 교차로 복귀) -> 하단 방향으로 턴(W/C) -> 마커(L) 지나서 하단 교차로 도달 ->
+# W(출차 구역 쪽으로 좌회전, 즉 오른쪽 바라봄) -> K(입차 구역 끝까지 후진 복귀)
+# ==========================================
+in_routes = {
+    1: "SLLLCLLCEEEOBBBCLLCKK",       # 1층 좌측: 픽업 -> 1L -> W(좌턴) -> E -> O -> B -> W(하단 턴) -> 1L -> W(우측 턴) -> K(후진 복귀)
+    2: "SLLLCLLWEEEOBBBWLLCK",       # 1층 우측: 픽업 -> 1L -> C(우턴) -> E -> O -> B -> C(하단 턴) -> 1L -> W(우측 턴) -> K(후진 복귀)
+    3: "SLLLCLLLLCEEEOBBBCLLLLCK",     # 2층 좌측: 픽업 -> 2L -> W(좌턴) -> E -> O -> B -> W(하단 턴) -> 2L -> W(우측 턴) -> K(후진 복귀)
+    4: "SLLLCLLLLWEEEOBBBWLLLLCK",    # 2층 우측: 픽업 -> 2L -> C(우턴) -> E -> O -> B -> C(하단 턴) -> 2L -> W(우측 턴) -> K(후진 복귀) 
+    5: "SLLLCLLLLLLCEEEOBBBCLLLLLLCK",   # 3층 좌측: 픽업 -> 3L -> W(좌턴) -> E -> O -> B -> W(하단 턴) -> 3L -> W(우측 턴) -> K(후진 복귀)
+    6: "SLLLCLLLLLLWEEEOBBBWLLLLLLCK",  # 3층 우측: 픽업 -> 3L -> C(우턴) -> E -> O -> B -> C(하단 턴) -> 3L -> W(우측 턴) -> K(후진 복귀)
+}
+
+# ==========================================
+# [출차 경로 (Outbound)]
+# 동작 순서:
+# 교차로 이동 후 좌회전(UP) -> 마커(L) 지나서 해당 층 도달 -> 주차칸 방향 턴(W/C) -> 
+# P(초음파 감지 진입) -> S(차량 픽업) -> B(후진으로 교차로 복귀) -> 하단 방향으로 턴(W/C) ->
+# 마커(L) 지나서 하단 교차로 도달 -> W(출차 구역 쪽으로 좌회전, 즉 오른쪽 바라봄) -> 
+# E(출차 구역 끝까지 진입) -> O(차량 드롭) -> K(입차 구역 끝까지 후진 복귀)
+# ==========================================
+out_routes = {
+    1: "LLLCLLCPSBBBCLLCEEEOK",        # 1층 좌측: 1L 진입 -> 픽업 -> B 후진 -> W(하단 턴) -> 1L 복귀 -> W(우측 턴) ->
+    2: "LLLCLLWPSBBBWLLCEEEOK",        # 1층 우측: 1L 진입 -> 픽업 -> B 후진 -> C(하단 턴) -> 1L 복귀 -> W(우측 턴) ->
+    3: "LLLCLLLLCPSBBBCLLLLCEEEOK",      # 2층 좌측
+    4: "LLLCLLLLWPSBBBWLLLLCEEEOK",      # 2층 우측
+    5: "LLLCLLLLLLCPSBBBCLLLLLLCEEEOK",    # 3층 좌측
+    6: "LLLCLLLLLLWPSBBBWLLLLLLCEEEOK"   # 3층 우측
+}
+
+ser = serial.Serial("/dev/serial0", 9600, timeout=1)
+time.sleep(2)
+
+while True:
+    print("\n=================================")
+    mode = input("작업 선택 (1: 입차, 2: 출차, q: 종료): ").strip()
+    
+    if mode.lower() == 'q':
+        print("프로그램을 종료합니다.")
+        break
+        
+    if mode not in ['1', '2']:
+        print("잘못된 입력입니다. 1 또는 2를 선택해주세요.")
+        continue
+
+    try:
+        parking_number = int(input("주차 번호 입력 (1~6): "))
+    except ValueError:
+        print("숫자만 입력 가능합니다.")
+        continue
+
+    if parking_number not in out_routes:
+        print("잘못된 주차 번호입니다. (1~6 입력)")
+        continue
+
+    if mode == '1':
+        route = in_routes[parking_number]
+        action_text = "입차"
+        print("\n[안내] 로봇 앞쪽 집게 위치에 차량을 놓은 뒤 진행됩니다.")
+    else:
+        route = out_routes[parking_number]
+        action_text = "출차"
+
+    # Pi -> Robot Arduino Uno 전송
+    tx_msg = f"ROUTE:{route}"
+
+    ser.write((tx_msg + "\n").encode())
+
+    print(f"[TX][RPI->UNO] {tx_msg}")
+    print(f"[INFO] {parking_number}번 칸 {action_text} 시퀀스 전송 완료")
+
+
+    # Robot Arduino Uno -> Pi 수신
+    while True:
+        if ser.in_waiting:
+            msg = ser.readline().decode(errors="ignore").strip()
+
+            if msg:
+                print(f"[RX][UNO->RPI] {msg}")
+
+            if msg == "ROUTE_DONE":
+                print(
+                    f"[INFO] {parking_number}번 {action_text} 작업 "
+                    f"및 입구(대기소) 복귀 완료!\n"
+                )
+                break
+
+ser.close()
